@@ -76,8 +76,8 @@ def __downloader(args):
             chunk.close()
     except Exception as e:
         logger.exception(f'catch exception: {e}')
-    # finally:
-    #     session.close()
+    finally:
+        session.close()
 
 
 async def __executor(logger, event):
