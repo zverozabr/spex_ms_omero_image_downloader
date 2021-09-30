@@ -6,11 +6,19 @@ from multiprocessing.pool import ThreadPool
 from spex_common.modules.logging import get_logger
 from spex_common.modules.aioredis import create_aioredis_client
 from spex_common.models.OmeroImageFileManager import OmeroImageFileManager
-from spex_common.services.OmeroBlitz import get_image_size, export_ome_tiff
+from spex_common.services.OmeroBlitz import get_original_files_info, download_original_files, can_download
 
 
 EVENT_TYPE = 'omero/download/image'
-FILE_CHUNK_SIZE = 1024*1024*10
+MIN_CHUNK_SIZE = 1024 * 1024 * 10
+
+
+def get_pool_size(env_name) -> int:
+    value = getenv(env_name, 'cpus')
+    if value.lower() == 'cpus':
+        value = cpu_count()
+
+    return max(1, int(value))
 
 
 def __downloader(args):
@@ -24,33 +32,52 @@ def __downloader(args):
     if not alive['is_alive']:
         return
 
+    chunk_size = manager.get_chunk_size()
+
+    logger.debug(f'Get session for user: {user}')
     session = omero_blitz.get(user, False)
-    from_position = index * FILE_CHUNK_SIZE
-    to_position = (index + 1) * FILE_CHUNK_SIZE
+    if session is None:
+        logger.info(f'No blitz session for user: {user}')
+        return
+
+    from_position = index * chunk_size
+    to_position = (index + 1) * chunk_size
+    buffer_size = 1024*1024
+    step = 0
 
     try:
         chunk = manager.open_chunk(index)
-        _, tiff_data = export_ome_tiff(
+        _, tiff_data, _ = download_original_files(
             session.get_gateway(),
             image,
             from_position,
             to_position,
-            buffer_size=1024*512
+            buffer_size
         )
 
+        logger.debug(f'Starting loading chunk {index} of image {image}')
         try:
             for block in tiff_data:
                 if not alive['is_alive']:
                     logger.debug(f'terminate because alive = {alive["is_alive"]}')
                     return
                 chunk.write(block)
+
+                if step % 10 == 0:
+                    logger.debug(f'{int((buffer_size*step / to_position) * 100)}%'
+                                 f' loaded ({buffer_size*step} of {chunk_size})'
+                                 f' chunk {index} of image {image}')
+
+                step += 1
+
+            logger.debug(f'100% loaded chunk {index} of image {image}')
             manager.finish_chunk(index)
         finally:
             chunk.close()
-    except Exception:
-        logger.exception()
-    finally:
-        session.close()
+    except Exception as e:
+        logger.exception(f'catch exception: {e}')
+    # finally:
+    #     session.close()
 
 
 async def __executor(logger, event):
@@ -64,6 +91,8 @@ async def __executor(logger, event):
     user = data['user']
     override = data['override']
 
+    logger.info(f'Processing image {image_id}')
+
     if image_id is None:
         logger.debug('property image_id is None')
         return
@@ -72,40 +101,53 @@ async def __executor(logger, event):
         logger.debug('property user is None')
         return
 
-    manager = OmeroImageFileManager(
-        image_id,
-        chunk_size=FILE_CHUNK_SIZE
-    )
+    manager = OmeroImageFileManager(image_id)
+
+    if manager.is_available():
+        logger.info(f'image {image_id} is not available for download! Skipping!')
+        return
 
     if manager.is_locked():
-        logger.debug(f'image {image_id} is locked! Skipping!')
+        logger.info(f'image {image_id} is locked! Skipping!')
         return
 
     try:
         manager.lock()
 
-        logger.debug(f'get session')
+        logger.debug(f'Get session for user: {user}')
         session = omero_blitz.get(user, False)
         if session is None:
-            logger.info("No blitz session")
+            logger.info(f'No blitz session for user: {user}')
             return
 
         try:
             gateway = session.get_gateway()
 
-            image_size = get_image_size(gateway, image_id)
+            if not override and manager.exists():
+                logger.info(f'image {image_id} exists! Skipping!')
+                return
+
+            if not can_download(gateway, image_id):
+                logger.info(f'image {image_id} cannot be downloaded')
+                manager.make_not_available()
+                return
+
+            files_info = get_original_files_info(gateway, image_id)
+
+            logger.info(f'image {image_id} has files_info: {files_info}')
+
+            image_size = files_info['size']
 
             logger.debug(f'image {image_id} has size: {image_size}')
 
+            # pool_size = get_pool_size('WORKER_THREADS_POOL')
             manager.set_expected_size(image_size)
-
-            if not override and manager.exists():
-                logger.debug(f'image {image_id} exists! Skipping!')
-                return
+            # chunk_size = max(MIN_CHUNK_SIZE, math.ceil(image_size / pool_size))
+            manager.set_chunk_size(MIN_CHUNK_SIZE)
 
             alive = {'is_alive': True}
 
-            pool = ThreadPool(processes=max(cpu_count(), getenv('WORKER_THREADS_POOL', 1)))
+            pool = ThreadPool(processes=get_pool_size('WORKER_THREADS_POOL'))
             try:
                 chunks = manager.get_unfinished_chunks()
                 while len(chunks) > 0:
@@ -133,8 +175,8 @@ async def __executor(logger, event):
             session.close()
     except KeyboardInterrupt:
         raise
-    except Exception:
-        logger.exception()
+    except Exception as e:
+        logger.exception(f'catch exception: {e}')
     finally:
         manager.unlock()
 
@@ -153,8 +195,8 @@ def worker(name):
         redis_client.run()
     except KeyboardInterrupt:
         pass
-    except Exception:
-        logger.exception()
+    except Exception as e:
+        logger.exception(f'catch exception: {e}')
     finally:
         logger.info('Closing')
         redis_client.close()

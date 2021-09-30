@@ -1,9 +1,8 @@
 import spex_common.modules.omero_blitz as omero_blitz
 from multiprocessing import freeze_support
-from os import cpu_count, getenv
 from spex_common.modules.logging import get_logger
 from spex_common.config import load_config
-from models.Worker import Worker
+from models.Worker import Worker, get_pool_size
 
 
 def connect_to_omero():
@@ -20,7 +19,7 @@ if __name__ == '__main__':
     session = connect_to_omero()
 
     workers = []
-    for index in range(max(cpu_count(), getenv('WORKERS_POOL', 1))):
+    for index in range(get_pool_size('WORKERS_POOL')):
         worker = Worker(index)
         workers.append(worker)
         worker.start()
