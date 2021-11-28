@@ -103,7 +103,7 @@ async def __executor(logger, event):
 
     manager = OmeroImageFileManager(image_id)
 
-    if manager.is_available():
+    if not manager.is_available():
         logger.info(f'image {image_id} is not available for download! Skipping!')
         return
 
