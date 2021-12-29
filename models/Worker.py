@@ -76,8 +76,8 @@ def __downloader(args):
             chunk.close()
     except Exception as e:
         logger.exception(f'catch exception: {e}')
-    # finally:
-    #     session.close()
+    finally:
+        session.close()
 
 
 async def __executor(logger, event):
@@ -103,7 +103,7 @@ async def __executor(logger, event):
 
     manager = OmeroImageFileManager(image_id)
 
-    if manager.is_available():
+    if not manager.is_available():
         logger.info(f'image {image_id} is not available for download! Skipping!')
         return
 
