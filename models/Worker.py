@@ -5,6 +5,7 @@ from multiprocessing import Process
 from multiprocessing.pool import ThreadPool
 from spex_common.modules.logging import get_logger
 from spex_common.modules.aioredis import create_aioredis_client
+from spex_common.models.RedisEvent import RedisEvent
 from spex_common.models.OmeroImageFileManager import OmeroImageFileManager
 from spex_common.services.OmeroBlitz import get_original_files_info, download_original_files, can_download
 
@@ -186,8 +187,11 @@ def worker(name):
     redis_client = create_aioredis_client()
 
     @redis_client.event(EVENT_TYPE)
-    async def listener(event):
+    async def listener(event: RedisEvent):
+        if event is None or event.is_viewed:
+            return
         logger.debug(f'catch event: {event}')
+        event.set_is_viewed()
         await __executor(logger, event)
 
     try:
