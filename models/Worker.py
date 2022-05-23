@@ -86,7 +86,7 @@ async def __executor(logger, event):
 
     if data is None:
         logger.debug('property data is None')
-        return
+        return False
 
     image_id = data['id']
     user = data['user']
@@ -96,21 +96,21 @@ async def __executor(logger, event):
 
     if image_id is None:
         logger.debug('property image_id is None')
-        return
+        return False
 
     if user is None:
         logger.debug('property user is None')
-        return
+        return False
 
     manager = OmeroImageFileManager(image_id)
 
     if not manager.is_available():
         logger.info(f'image {image_id} is not available for download! Skipping!')
-        return
+        return False
 
     if manager.is_locked():
         logger.info(f'image {image_id} is locked! Skipping!')
-        return
+        return False
 
     try:
         manager.lock()
@@ -119,19 +119,19 @@ async def __executor(logger, event):
         session = omero_blitz.get(user, False)
         if session is None:
             logger.info(f'No blitz session for user: {user}')
-            return
+            return False
 
         try:
             gateway = session.get_gateway()
 
             if not override and manager.exists():
                 logger.info(f'image {image_id} exists! Skipping!')
-                return
+                return False
 
             if not can_download(gateway, image_id):
                 logger.info(f'image {image_id} cannot be downloaded')
                 manager.make_not_available()
-                return
+                return False
 
             files_info = get_original_files_info(gateway, image_id)
 
@@ -164,6 +164,8 @@ async def __executor(logger, event):
                     chunks = manager.get_unfinished_chunks()
 
                 manager.merge_chunks()
+
+                return manager.exists()
             except KeyboardInterrupt:
                 pool.terminate()
                 raise
@@ -192,11 +194,13 @@ def worker(name):
             return
         logger.debug(f'catch event: {event}')
         event.set_is_viewed()
-        await __executor(logger, event)
+        result = await __executor(logger, event)
+        if result:
+            await redis_client.send(f'{EVENT_TYPE}/done', event.data)
 
     try:
         logger.info('Starting')
-        redis_client.run()
+        redis_client.run(5)
     except KeyboardInterrupt:
         pass
     except Exception as e:
