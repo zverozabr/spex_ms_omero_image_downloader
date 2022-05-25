@@ -194,8 +194,15 @@ def worker(name):
             return
         logger.debug(f'catch event: {event}')
         event.set_is_viewed()
-        result = await __executor(logger, event)
-        if result:
+        try:
+            result = await __executor(logger, event)
+            if result:
+                await redis_client.send(f'{EVENT_TYPE}/done', event.data)
+        except KeyboardInterrupt as err:
+            raise err
+        except Exception as err:
+            logger.exception(f'catch exception: {err}')
+            # TODO maybe better to send error event
             await redis_client.send(f'{EVENT_TYPE}/done', event.data)
 
     try:
